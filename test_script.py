@@ -26,6 +26,7 @@ aux_cache = AuxCache(4, 2, 5, 128)
 output_attentions = False
 cache_position = torch.tensor([0, 1, 2, 3, 4], dtype=torch.long)
 sequence_length = 5
+tokens_positions_idxs = torch.tensor([[], []], dtype=torch.long)
 
 output = model(
     input_ids=input_ids,
@@ -35,7 +36,7 @@ output = model(
     aux_cache=aux_cache,
     output_attentions=output_attentions,
     cache_position=cache_position,
-    sequence_length=sequence_length,
+    tokens_positions_idxs=tokens_positions_idxs,
 )
 
 torch.save(output[0], "output.pt")
