@@ -93,11 +93,11 @@ class Context:
         return local_kv_cache
 
     def get_aux_cache(self, layer_idx: int):
-        # TODO: Do those two statements in one
-        in_aux_cache_bit_array = torch.logical_and(self.aux_cache.cache_status_bit_array[layer_idx-1], self.selected_tokens_bit_array)
-        
-        # Removing those tokens that are in KV Cache
-        in_aux_cache_bit_array = torch.logical_and(in_aux_cache_bit_array, torch.logical_not(self.in_kv_cache_bit_array))
+        in_aux_cache_bit_array = torch.logical_and(
+            torch.logical_and(self.aux_cache.cache_status_bit_array[layer_idx-1], self.selected_tokens_bit_array), 
+            # Removing those tokens that are in KV Cache
+            torch.logical_not(self.in_kv_cache_bit_array)
+        )
         in_aux_cache_idxs = torch.nonzero(in_aux_cache_bit_array).view(-1)
 
         states_to_concatenate = [None] * (len(in_aux_cache_idxs) + 1)
@@ -210,13 +210,23 @@ class DecoderLayer(nn.Module):
         context.hidden_states = new_hidden_states
 
         context.update_kv_cache(new_local_kv_cache, self.layer_idx)
-        
-        attn_weights_to_last_tkn = attention_weights[:, :, -1, :]
+
+        # The last token's key index will be the index of the last token in the hidden states, plus the number of tokens in the KV Cache.
+        # This is because the KV Cache always comes before the hidden states in the attention mechanism.
+        last_token_key_idx = context.in_kv_cache_idxs.shape[0] + context.tkns_idxs_to_hidden_states_idxs[-1]
+
+        attn_weights_to_last_tkn = attention_weights[:, :, last_token_key_idx, :]
         importance_scores_list = torch.sum(attn_weights_to_last_tkn, dim=(0,1)) / (attention_weights.shape[0] * attention_weights.shape[1])
-        # TODO: Solve the issue with pruning the last token
+
         pruning_rate = self.config.pruning_rates[self.layer_idx]
 
-        _, to_prune_list_idxs = torch.topk(importance_scores_list, int(pruning_rate * importance_scores_list.shape[0]), largest=False)
+        if importance_scores_list.shape[0] > 1:
+            # Removing the last token's key from the importance scores list, because we don't want to prune it
+            importance_scores_list = torch.cat([importance_scores_list[:last_token_key_idx], importance_scores_list[last_token_key_idx+1:]])
+            _, to_prune_list_idxs = torch.topk(importance_scores_list, int(pruning_rate * importance_scores_list.shape[0]), largest=False)
+        else:
+            to_prune_list_idxs = torch.tensor([], dtype=torch.long)
+
         to_prune_list_idxs = to_prune_list_idxs.to(context.device)
         to_prune_idxs = context.keys_idxs_to_tokens_idxs[to_prune_list_idxs]
 
@@ -289,7 +299,6 @@ class LazyLlamaModel(PreTrainedModel):
         tokens_positions_idxs = tokens_positions_idxs.to(device)
         tokens_positions_idxs = torch.cat([tokens_positions_idxs, position_ids], dim=1)
 
-        # TODO: Make sure the SDPA is always used 
         causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
             attention_mask,
             sequence_length,
