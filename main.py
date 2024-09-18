@@ -63,8 +63,7 @@ class LazyLlamaModel(PreTrainedModel):
         # so the sequence length is the position of the last hidden state + 1  
         sequence_length = cache_position[-1].item() + 1
 
-        tokens_positions_idxs = tokens_positions_idxs.to(device)
-        tokens_positions_idxs = torch.cat([tokens_positions_idxs, position_ids], dim=1)
+        tokens_positions_idxs.index_copy_(dim=1, index=cache_position, source=position_ids)
 
         causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
             attention_mask,
