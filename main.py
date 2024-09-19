@@ -1,6 +1,6 @@
 from typing import Optional
 from config import LazyLlamaConfig
-from transformers import PreTrainedModel, LogitsProcessorList
+from transformers import PreTrainedModel, LogitsProcessorList, LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm, LlamaRotaryEmbedding, _prepare_4d_causal_attention_mask_with_cache_position
 )
@@ -9,6 +9,15 @@ import torch
 from decoder_layer import DecoderLayer
 from caches import KVCache, AuxCache
 from context import Context
+from collections import OrderedDict
+
+def modify_key(key):
+    if "model.layers" in key:
+        temp = key.split(".")
+        temp.insert(3, "decoder")
+        return ".".join(temp)
+    else:
+        return key
 
 class LazyLlamaModel(PreTrainedModel):
     def __init__(self, config: LazyLlamaConfig):
@@ -88,6 +97,19 @@ class LazyLlamaModel(PreTrainedModel):
         context.hidden_states = self.norm(context.hidden_states)
 
         return context.hidden_states, all_self_attns
+    
+    def from_llama_state_dict(llama_state_dict, config, pruning_rates=None):
+        if isinstance(config, LlamaConfig):
+            config = LazyLlamaConfig.from_llama_config(pruning_rates, config)
+        elif not isinstance(config, LazyLlamaConfig):
+            raise ValueError("Config must be an instance of either LlamaConfig or LazyLlamaConfig.")
+            
+        new_state_dict = OrderedDict((modify_key(key), value) for key, value in llama_state_dict.items())
+
+        model = LazyLlamaModel(config)
+        model.load_state_dict(new_state_dict)
+
+        return model
     
 class LazyLlamaForCausalLM(PreTrainedModel):
     def __init__(self, config):
@@ -212,3 +234,16 @@ class LazyLlamaForCausalLM(PreTrainedModel):
             })
             
         return output_sequence
+    
+    def from_llama_state_dict(llama_state_dict, config, pruning_rates=None):
+        if isinstance(config, LlamaConfig):
+            config = LazyLlamaConfig.from_llama_config(pruning_rates, config)
+        elif not isinstance(config, LazyLlamaConfig):
+            raise ValueError("Config must be an instance of either LlamaConfig or LazyLlamaConfig.")
+            
+        new_state_dict = OrderedDict((modify_key(key), value) for key, value in llama_state_dict.items())
+
+        model = LazyLlamaForCausalLM(config)
+        model.load_state_dict(new_state_dict)
+
+        return model
