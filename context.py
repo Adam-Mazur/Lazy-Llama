@@ -29,7 +29,11 @@ class Context:
         # Equivalent to the cache_position in the original code
         self.hidden_states_idxs = hidden_states_idxs
         
-        self.selected_tokens_bit_array = torch.ones(sequence_length, device=self.device, dtype=torch.bool)
+        max_sequence_length = kv_cache.size[2]
+
+        self.selected_tokens_bit_array = torch.zeros(max_sequence_length, device=self.device, dtype=torch.bool)
+        self.selected_tokens_bit_array[torch.arange(sequence_length, device=self.device)] = True
+
         self.in_kv_cache_idxs = None
 
     @property
@@ -61,8 +65,8 @@ class Context:
 
         for position_idx in in_kv_cache_idxs:
             local_kv_cache.update(
-                self.kv_cache.key_cache[layer_idx][:, :, position_idx, :], 
-                self.kv_cache.value_cache[layer_idx][:, :, position_idx, :],
+                self.kv_cache.key_cache[layer_idx][:, :, [position_idx], :], 
+                self.kv_cache.value_cache[layer_idx][:, :, [position_idx], :],
                 0,
             )
 
@@ -76,11 +80,10 @@ class Context:
         )
         in_aux_cache_idxs = torch.nonzero(in_aux_cache_bit_array).view(-1)
 
-        states_to_concatenate = [None] * (len(in_aux_cache_idxs) + 1)
-        states_to_concatenate[0] = self.hidden_states
+        states_to_concatenate = [self.hidden_states]
 
         for position_idx in in_aux_cache_idxs:
-            states_to_concatenate[position_idx] = self.aux_cache.cache[layer_idx-1][:, position_idx, :]
+            states_to_concatenate.append(self.aux_cache.cache[layer_idx-1][:, [position_idx], :])
 
         self.hidden_states = torch.cat(states_to_concatenate, dim=1)
 

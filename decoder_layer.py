@@ -44,18 +44,19 @@ class DecoderLayer(nn.Module):
 
         context.update_kv_cache(new_local_kv_cache, self.layer_idx)
 
+        last_token_query_idx = context.tkns_idxs_to_hidden_states_idxs[-1]
         # The last token key's index will be the index of the last token in the hidden states, plus the number of tokens in the KV Cache.
         # This is because the KV Cache always comes before the hidden states in the attention mechanism.
-        last_token_key_idx = context.in_kv_cache_idxs.shape[0] + context.tkns_idxs_to_hidden_states_idxs[-1]
+        last_token_key_idx = context.in_kv_cache_idxs.shape[0] + last_token_query_idx
 
-        attn_weights_to_last_tkn = attention_weights[:, :, last_token_key_idx, :]
+        attn_weights_to_last_tkn = attention_weights[:, :, last_token_query_idx, :]
         importance_scores_list = torch.sum(attn_weights_to_last_tkn, dim=(0,1)) / (attention_weights.shape[0] * attention_weights.shape[1])
 
         pruning_rate = self.config.pruning_rates[self.layer_idx]
 
         if importance_scores_list.shape[0] > 1:
-            # Removing the last token's key from the importance scores list, because we don't want to prune it
-            importance_scores_list = torch.cat([importance_scores_list[:last_token_key_idx], importance_scores_list[last_token_key_idx+1:]])
+            # Setting the last token's importance to infinity, because we don't want to prune it
+            importance_scores_list[last_token_key_idx] = float("inf")
             _, to_prune_list_idxs = torch.topk(importance_scores_list, int(pruning_rate * importance_scores_list.shape[0]), largest=False)
         else:
             to_prune_list_idxs = torch.tensor([], dtype=torch.long)
