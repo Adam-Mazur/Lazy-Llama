@@ -56,6 +56,8 @@ class LazyLlamaModel(PreTrainedModel):
             dtype,
             device,
             torch.finfo(dtype).min,
+            # The cache_position tensor only includes the positions of current hidden states, but
+            # we need the positions of all tokens in the sequence
             torch.arange(sequence_length, device=device),
             batch_size,
         )
@@ -128,6 +130,7 @@ class LazyLlamaForCausalLM(PreTrainedModel):
         attention_mask: torch.Tensor,
         max_length: int,
         eos_token_id: int,
+        pad_token_id: int,
         output_attentions: bool = False, 
         logits_processor: Optional[LogitsProcessorList] = None,
         do_sample: bool = False,
@@ -171,6 +174,8 @@ class LazyLlamaForCausalLM(PreTrainedModel):
             "output_attentions": output_attentions, 
         }
 
+        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
+
         while cache_position[-1].item() < max_length and not torch.all(input_ids[:, -1] == eos_token_id):
             outputs = self(**model_inputs)
 
@@ -183,7 +188,10 @@ class LazyLlamaForCausalLM(PreTrainedModel):
             else:
                 next_tokens = torch.argmax(next_token_scores, dim=-1)
 
-            # TODO: Fill finished sequences with padding tokens
+            # Finished sentences should have their next token be a padding token
+            next_tokens = next_tokens * unfinished_sequences + (1 - unfinished_sequences) * pad_token_id
+
+            unfinished_sequences.mul_(next_tokens != eos_token_id)
 
             # Updating model inputs for the next generation step
             input_ids = next_tokens.view(-1, 1) 
