@@ -56,7 +56,7 @@ class LazyLlamaModel(PreTrainedModel):
             dtype,
             device,
             torch.finfo(dtype).min,
-            cache_position,
+            torch.arange(sequence_length, device=device),
             batch_size,
         )
 
@@ -185,7 +185,7 @@ class LazyLlamaForCausalLM(PreTrainedModel):
 
             # TODO: Fill finished sequences with padding tokens
 
-            # Updating model inputs for the next generatio step
+            # Updating model inputs for the next generation step
             input_ids = next_tokens.view(-1, 1) 
             output_sequence = torch.cat([output_sequence, input_ids], dim=-1)             
             cache_position = torch.tensor([cache_position[-1] + 1], device=cache_position.device)
