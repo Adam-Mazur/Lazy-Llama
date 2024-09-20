@@ -171,6 +171,7 @@ class LazyLlamaForCausalLM(PreTrainedModel):
             self.config.num_attention_heads,
             max_length,
             embed_size_per_head,
+            input_ids.device,
         )
 
         aux_cache = AuxCache(
@@ -178,6 +179,7 @@ class LazyLlamaForCausalLM(PreTrainedModel):
             batch_size,
             max_length,
             self.config.hidden_size,
+            input_ids.device,
         )
 
         cache_position = torch.arange(input_ids.shape[1], device=input_ids.device)
