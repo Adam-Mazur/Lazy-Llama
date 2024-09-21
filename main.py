@@ -168,7 +168,7 @@ class LazyLlamaForCausalLM(PreTrainedModel):
         kv_cache = KVCache(
             self.config.num_hidden_layers,
             batch_size,
-            self.config.num_attention_heads,
+            self.config.num_key_value_heads,
             max_length,
             embed_size_per_head,
             input_ids.device,

@@ -1,6 +1,6 @@
 import torch
 from caches import KVCache, AuxCache
-from transformers import DynamicCache
+from transformers import StaticCache, PretrainedConfig
 
 class Context:
     def __init__(
@@ -55,7 +55,19 @@ class Context:
         return bit_array
 
     def get_kv_cache(self, layer_idx: int):
-        local_kv_cache = DynamicCache()
+        config = PretrainedConfig(
+            head_dim=self.kv_cache.size[3],
+            num_key_value_heads=self.kv_cache.size[1],
+            num_hidden_layers=1,
+        )
+
+        local_kv_cache = StaticCache(
+            config=config,
+            max_batch_size=self.kv_cache.size[0],
+            # The cache size must be equal to the number of selected tokens, because otherwise the attention mechanism will break
+            max_cache_len=torch.nonzero(self.selected_tokens_bit_array).view(-1).shape[0],
+            device=self.device
+        )
 
         in_kv_cache_bit_array = torch.logical_and(self.kv_cache.cache_status_bit_array[layer_idx], self.selected_tokens_bit_array)
         in_kv_cache_idxs = torch.nonzero(in_kv_cache_bit_array).view(-1)
@@ -63,12 +75,12 @@ class Context:
         self.in_kv_cache_idxs = in_kv_cache_idxs
         self.in_kv_cache_bit_array = in_kv_cache_bit_array
 
-        for position_idx in in_kv_cache_idxs:
-            local_kv_cache.update(
-                self.kv_cache.key_cache[layer_idx][:, :, [position_idx], :], 
-                self.kv_cache.value_cache[layer_idx][:, :, [position_idx], :],
-                0,
-            )
+        local_kv_cache.update(
+            self.kv_cache.key_cache[layer_idx][:, :, in_kv_cache_idxs, :],
+            self.kv_cache.value_cache[layer_idx][:, :, in_kv_cache_idxs, :],
+            0,
+            {"cache_position": torch.arange(in_kv_cache_idxs.shape[0], device=self.device)}
+        )
 
         return local_kv_cache
 
@@ -93,7 +105,7 @@ class Context:
     def hidden_states_positions(self):
         return self.tokens_positions_idxs[:, self.hidden_states_idxs]
 
-    def update_kv_cache(self, local_kv_cache: DynamicCache, layer_idx: int):
+    def update_kv_cache(self, local_kv_cache: StaticCache, layer_idx: int):
         in_hidden_states_bit_array = torch.logical_and(
             self.selected_tokens_bit_array, 
             torch.logical_not(self.kv_cache.cache_status_bit_array[layer_idx])
@@ -106,7 +118,7 @@ class Context:
 
         new_kv_cache_idxs = torch.nonzero(in_hidden_states_bit_array).view(-1)
 
-        # Mapping the new KV Caches from the DynamicCache, to the KVCache. The new caches in DynamicCache are subsequent to the old ones,
+        # Mapping the new KV Caches from the StaticCache, to the KVCache. The new caches in StaticCache are subsequent to the old ones,
         # therefore, [:, :, self.in_kv_cache_idxs.shape[0]:, :] is used to index them.
         self.kv_cache.key_cache[layer_idx][:, :, new_kv_cache_idxs, :] = local_kv_cache.key_cache[0][:, :, self.in_kv_cache_idxs.shape[0]:, :]
         self.kv_cache.value_cache[layer_idx][:, :, new_kv_cache_idxs, :] = local_kv_cache.value_cache[0][:, :, self.in_kv_cache_idxs.shape[0]:, :]

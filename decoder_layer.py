@@ -38,6 +38,14 @@ class DecoderLayer(nn.Module):
             output_attentions=True,
             use_cache=True,
             position_embeddings=position_embeddings,
+            # The cache position is used to insert new keys and values into the cache. Since I just want
+            # them to be appended to the end of the cache, I need to make sure they get inserted after the
+            # last token from KV cache.
+            cache_position=torch.arange(
+                context.in_kv_cache_idxs.shape[0],
+                context.hidden_states.shape[1] + context.in_kv_cache_idxs.shape[0], 
+                device=context.device
+            ),
         )
 
         context.hidden_states = new_hidden_states
