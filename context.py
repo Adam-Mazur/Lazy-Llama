@@ -1,6 +1,5 @@
 import torch
-from caches import KVCache, AuxCache
-from transformers import StaticCache, PretrainedConfig
+from caches import KVCache, AuxCache, HFCache
 
 class Context:
     def __init__(
@@ -55,31 +54,30 @@ class Context:
         return bit_array
 
     def get_kv_cache(self, layer_idx: int):
-        config = PretrainedConfig(
-            head_dim=self.kv_cache.size[3],
-            num_key_value_heads=self.kv_cache.size[1],
-            num_hidden_layers=1,
-        )
-
-        local_kv_cache = StaticCache(
-            config=config,
-            max_batch_size=self.kv_cache.size[0],
-            # The cache size must be equal to the number of selected tokens, because otherwise the attention mechanism will break
-            max_cache_len=torch.nonzero(self.selected_tokens_bit_array).view(-1).shape[0],
-            device=self.device
-        )
-
         in_kv_cache_bit_array = torch.logical_and(self.kv_cache.cache_status_bit_array[layer_idx], self.selected_tokens_bit_array)
         in_kv_cache_idxs = torch.nonzero(in_kv_cache_bit_array).view(-1)
 
         self.in_kv_cache_idxs = in_kv_cache_idxs
         self.in_kv_cache_bit_array = in_kv_cache_bit_array
 
-        local_kv_cache.update(
-            self.kv_cache.key_cache[layer_idx][:, :, in_kv_cache_idxs, :],
-            self.kv_cache.value_cache[layer_idx][:, :, in_kv_cache_idxs, :],
-            0,
-            {"cache_position": torch.arange(in_kv_cache_idxs.shape[0], device=self.device)}
+        if in_kv_cache_idxs.shape[0] == 0:
+            cache = None
+        else:
+            cache = (
+                torch.index_select(self.kv_cache.key_cache[layer_idx], 2, in_kv_cache_idxs),
+                torch.index_select(self.kv_cache.value_cache[layer_idx], 2, in_kv_cache_idxs),
+            )
+
+        local_kv_cache = HFCache(
+            shape = (
+                self.kv_cache.size[0], 
+                self.kv_cache.size[1], 
+                # The cache size must be equal to the number of selected tokens, because otherwise the attention mechanism will break
+                torch.nonzero(self.selected_tokens_bit_array).view(-1).shape[0], 
+                self.kv_cache.size[3]
+            ), 
+            cache=cache,
+            device=self.device
         )
 
         return local_kv_cache
@@ -105,7 +103,7 @@ class Context:
     def hidden_states_positions(self):
         return self.tokens_positions_idxs[:, self.hidden_states_idxs]
 
-    def update_kv_cache(self, local_kv_cache: StaticCache, layer_idx: int):
+    def update_kv_cache(self, local_kv_cache: HFCache, layer_idx: int):
         in_hidden_states_bit_array = torch.logical_and(
             self.selected_tokens_bit_array, 
             torch.logical_not(self.kv_cache.cache_status_bit_array[layer_idx])
@@ -118,10 +116,18 @@ class Context:
 
         new_kv_cache_idxs = torch.nonzero(in_hidden_states_bit_array).view(-1)
 
-        # Mapping the new KV Caches from the StaticCache, to the KVCache. The new caches in StaticCache are subsequent to the old ones,
-        # therefore, [:, :, self.in_kv_cache_idxs.shape[0]:, :] is used to index them.
-        self.kv_cache.key_cache[layer_idx][:, :, new_kv_cache_idxs, :] = local_kv_cache.key_cache[0][:, :, self.in_kv_cache_idxs.shape[0]:, :]
-        self.kv_cache.value_cache[layer_idx][:, :, new_kv_cache_idxs, :] = local_kv_cache.value_cache[0][:, :, self.in_kv_cache_idxs.shape[0]:, :]
+        # Mapping the new KV Caches from the HFCache, to the KVCache. The new caches in HFCache are subsequent to the old ones,
+        # therefore, we need to slice them starting from "self.in_kv_cache_idxs.shape[0]" along the second dimension.
+        self.kv_cache.key_cache[layer_idx].index_copy_(
+            2, 
+            new_kv_cache_idxs, 
+            torch.narrow(local_kv_cache.key_cache[0], 2, self.in_kv_cache_idxs.shape[0], new_kv_cache_idxs.shape[0])
+        )
+        self.kv_cache.value_cache[layer_idx].index_copy_(
+            2,
+            new_kv_cache_idxs,
+            torch.narrow(local_kv_cache.value_cache[0], 2, self.in_kv_cache_idxs.shape[0], new_kv_cache_idxs.shape[0])
+        )
 
     def update_aux_cache(self, to_prune_idxs: torch.LongTensor, layer_idx: int):
         in_next_layer_kv_bit_array = self.kv_cache.cache_status_bit_array[layer_idx+1]
@@ -147,7 +153,11 @@ class Context:
         to_add_to_aux_idxs = torch.nonzero(to_add_to_aux_bit_array).view(-1)
 
         # Hidden states are stored in random order, so the tkns_idxs_to_hidden_states_idxs mapping is needed. 
-        self.aux_cache.cache[layer_idx][:, to_add_to_aux_idxs, :] = self.hidden_states[:, self.tkns_idxs_to_hidden_states_idxs[to_add_to_aux_idxs], :]
+        self.aux_cache.cache[layer_idx].index_copy_(
+            1, 
+            to_add_to_aux_idxs, 
+            torch.index_select(self.hidden_states, 1, self.tkns_idxs_to_hidden_states_idxs[to_add_to_aux_idxs])
+        )
 
     def prune(self, to_prune_idxs: torch.LongTensor):
         self.selected_tokens_bit_array[to_prune_idxs] = False

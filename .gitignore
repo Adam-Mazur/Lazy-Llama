@@ -1,3 +1,4 @@
 /misc
 .vscode/
 __pycache__/
+/logs
