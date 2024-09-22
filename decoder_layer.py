@@ -24,10 +24,10 @@ class DecoderLayer(nn.Module):
             context.get_aux_cache(self.layer_idx)
   
         # Removing the columns corresponding to the tokens that were pruned
-        causal_mask = causal_mask[:, :, :, context.keys_idxs_to_tokens_idxs]
+        causal_mask = torch.index_select(causal_mask, 3, context.keys_idxs_to_tokens_idxs)
 
-        # Modifying the causal mask's rows to only include the tokens in hidden states, in correct order 
-        causal_mask = causal_mask[:, :, context.hidden_states_idxs, :]
+        # Modifying the causal mask's rows to only include the tokens in hidden states, in correct order
+        causal_mask = torch.index_select(causal_mask, 2, context.hidden_states_idxs) 
 
         position_embeddings = rotary_emb(context.hidden_states, context.hidden_states_positions)
 
@@ -67,9 +67,8 @@ class DecoderLayer(nn.Module):
             importance_scores_list[last_token_key_idx] = float("inf")
             _, to_prune_list_idxs = torch.topk(importance_scores_list, int(pruning_rate * importance_scores_list.shape[0]), largest=False)
         else:
-            to_prune_list_idxs = torch.tensor([], dtype=torch.long)
+            to_prune_list_idxs = torch.tensor([], dtype=torch.long, device=context.device)
 
-        to_prune_list_idxs = to_prune_list_idxs.to(context.device)
         to_prune_idxs = context.keys_idxs_to_tokens_idxs[to_prune_list_idxs]
 
         if self.layer_idx < self.config.num_hidden_layers - 1:
