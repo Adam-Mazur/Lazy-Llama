@@ -3,21 +3,50 @@ from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRot
 import torch
 from context import Context
 import torch.nn as nn
+from typing import Tuple, Optional
 
 class DecoderLayer(nn.Module):
-    def __init__(self, config: LazyLlamaConfig, layer_idx):
+    """
+    A custom decoder layer that builds upon the LlamaDecoderLayer and implements dynamic token pruning.
+
+    This layer utilizes KV cache and Aux Cache to speed up the "time-to-first-token" (TTFT) of Hugging 
+    Face's LLaMa 2 implementation. Dynamic token pruning is used in each forward pass, based on attention 
+    importance scores and pruning rates defined in the configuration. 
+    """
+    def __init__(self, config: LazyLlamaConfig, layer_idx: int):
+        """
+        Initializes the decoder layer.
+
+        Args:
+            config (LazyLlamaConfig): Configuration object containing model hyperparameters.
+            layer_idx (int): The index of the current decoder layer.
+        """
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+
+        # The LlamaDecoderLayer needs the layer index to retrieve the correct KV Cache, however we only pass it the 
+        # KV Cache of the current layer. Therefore the layer index needs to be 0 for all LlamaDecoderLayers.
         self.decoder = LlamaDecoderLayer(config, 0)
 
     def forward(
-        self,
-        context: Context,
-        causal_mask: torch.Tensor,
-        rotary_emb: LlamaRotaryEmbedding,
-        output_attentions: bool,
-    ):
+            self,
+            context: Context,
+            causal_mask: torch.FloatTensor,
+            rotary_emb: LlamaRotaryEmbedding,
+            output_attentions: bool,
+        ) -> Tuple[Context, Optional[torch.Tensor]]:
+        """
+        Executes the forward pass for the decoder layer, updating the hidden states and caches, 
+        and optionally returning attention weights.
+
+        Args:
+            context (Context): The context object containing hidden states, KV Cache, Aux Cache, etc.
+            causal_mask (torch.Tensor): The 4D causal mask for the attention mechanism. 
+            rotary_emb (LlamaRotaryEmbedding): The rotary embedding layer. This must be passed to the decoder since it 
+                recomputes the embeddings for tokens from the Aux Cache.
+            output_attentions (bool): Whether to return attention weights.
+        """
         local_kv_cache = context.get_kv_cache(self.layer_idx)
 
         if self.layer_idx > 0:
@@ -38,9 +67,8 @@ class DecoderLayer(nn.Module):
             output_attentions=True,
             use_cache=True,
             position_embeddings=position_embeddings,
-            # The cache position is used to insert new keys and values into the cache. Since I just want
-            # them to be appended to the end of the cache, I need to make sure they get inserted after the
-            # last token from KV cache.
+            # The cache position is used to insert new keys and values into the cache. Since I just want them to be 
+            # appended to the end of the cache, I need to make sure they get inserted after the last token from KV cache.
             cache_position=torch.arange(
                 context.in_kv_cache_idxs.shape[0],
                 context.hidden_states.shape[1] + context.in_kv_cache_idxs.shape[0], 

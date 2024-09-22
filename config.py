@@ -1,15 +1,35 @@
 from transformers import LlamaConfig
 
 class LazyLlamaConfig(LlamaConfig):
+    """
+    A configuration class that extends the LlamaConfig with support for pruning rates. 
+    Used for both LazyLlamaModel and LazyLlamaForCausalLM.
+    """
     def __init__(
             self,
             pruning_rates: dict, 
             **kwargs
         ):
+        """
+        Initializes the LazyLlamaConfig with pruning rates and other LlamaConfig parameters.
+
+        Args:
+            pruning_rates (dict): A dictionary specifying the pruning rate for each layer. The format is {layer_index: pruning_rate} 
+                starting at 0. The pruning rate is a float value between 0 and 1, where 0 means all tokens are preserved and 1 
+                means only the last token is preserved.
+            **kwargs: Other arguments passed to the base LlamaConfig class.
+
+        """
         self.pruning_rates = pruning_rates
         super().__init__(**kwargs)
 
     def from_llama_config(pruning_rates: dict, config: LlamaConfig):
+        """
+        Initializes a LazyLlamaConfig instance from an existing LlamaConfig.
+        
+        This method takes a base LlamaConfig object and creates a LazyLlamaConfig
+        by copying the existing configuration parameters and adding the pruning rates.
+        """
         return LazyLlamaConfig(
             pruning_rates=pruning_rates,
             vocab_size=config.vocab_size,

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Union
 from config import LazyLlamaConfig
 from transformers import PreTrainedModel, LogitsProcessorList, LlamaConfig
 from transformers.models.llama.modeling_llama import (
@@ -20,6 +20,12 @@ def modify_key(key):
         return key
 
 class LazyLlamaModel(PreTrainedModel):
+    """
+    A custom decoder-based model that builds upon the LlamaModel and implements dynamic token pruning.
+
+    This is an implementation of "LazyLLM: DYNAMIC TOKEN PRUNING FOR EFFICIENT LONG CONTEXT LLM INFERENCE"
+    with LLaMa 2 as the base model.
+    """
     def __init__(self, config: LazyLlamaConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
@@ -34,18 +40,31 @@ class LazyLlamaModel(PreTrainedModel):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
     
     def forward(
-        self,
-        # Those three were added in the LazyLlamaModel, and are not present in the original code
-        kv_cache: KVCache,
-        aux_cache: AuxCache,
-        # Original inputs
-        cache_position: torch.LongTensor,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
-    ):
+            self,
+            kv_cache: KVCache,
+            aux_cache: AuxCache,
+            cache_position: torch.LongTensor,
+            input_ids: torch.LongTensor,
+            attention_mask: torch.Tensor,
+            position_ids: torch.LongTensor,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            output_attentions: Optional[bool] = None,
+        ):
+        """
+        Executes the forward pass for the model, updating the hidden states and caches,
+
+        Args:
+            kv_cache (KVCache): The key-value cache.
+            aux_cache (AuxCache): The aux cache.
+            cache_position (torch.LongTensor): The position of the hidden states in the sequence. Same as the `cache_position`
+                in the original code.
+            input_ids (torch.LongTensor): The input token IDs of shape (batch_size, sequence_length).
+            attention_mask (torch.Tensor): The 2D attention mask of shape (batch_size, sequence_length).
+            position_ids (torch.LongTensor): The position IDs for the whole sequence. Note that in the original code, this
+                argument was only storing the positions of the current hidden states, not the whole sequence.
+            inputs_embeds (torch.FloatTensor): Optional input embeddings. Can be used instead of `input_ids`.
+            output_attentions (bool): Whether to return attention weights.
+        """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         
         if inputs_embeds is None:
@@ -59,16 +78,16 @@ class LazyLlamaModel(PreTrainedModel):
         sequence_length = cache_position[-1].item() + 1
 
         causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
-            attention_mask,
-            sequence_length,
-            sequence_length,
-            dtype,
-            device,
-            torch.finfo(dtype).min,
+            attention_mask=attention_mask,
+            sequence_length=sequence_length,
+            target_length=sequence_length,
+            dtype=dtype,
+            device=device,
+            min_dtype=torch.finfo(dtype).min,
             # The cache_position tensor only includes the positions of current hidden states, but
             # we need the positions of all tokens in the sequence
-            torch.arange(sequence_length, device=device),
-            batch_size,
+            cache_position=torch.arange(sequence_length, device=device),
+            batch_size=batch_size,
         )
 
         context = Context(
@@ -98,7 +117,19 @@ class LazyLlamaModel(PreTrainedModel):
 
         return context.hidden_states, all_self_attns
     
-    def from_llama_state_dict(llama_state_dict, config, pruning_rates=None):
+    def from_llama_state_dict(
+            llama_state_dict: OrderedDict, 
+            config: Union[LlamaConfig, LazyLlamaConfig], 
+            pruning_rates: Optional[dict] = None
+        ):
+        """
+        Initializes the LazyLlamaModel from a state dict of a LlamaModel.
+        
+        Args:
+            llama_state_dict (OrderedDict): The state dict of the LlamaModel.
+            config (Union[LlamaConfig, LazyLlamaConfig]): The configuration of the LazyLlamaModel.
+            pruning_rates (Optional[dict]): The pruning rates for each layer. Only required if `config` is an instance of LlamaConfig.
+        """
         if isinstance(config, LlamaConfig):
             config = LazyLlamaConfig.from_llama_config(pruning_rates, config)
         elif not isinstance(config, LazyLlamaConfig):
@@ -112,6 +143,13 @@ class LazyLlamaModel(PreTrainedModel):
         return model
     
 class LazyLlamaForCausalLM(PreTrainedModel):
+    """
+    A custom decoder-based model that builds upon the LlamaModel and implements dynamic token pruning.
+
+    This is an implementation of "LazyLLM: DYNAMIC TOKEN PRUNING FOR EFFICIENT LONG CONTEXT LLM INFERENCE"
+    with LLaMa 2 as the base model. It is specifically designed for causal language modeling tasks and it 
+    implements a custom generate method.
+    """
     def __init__(self, config):
         super().__init__(config)
         self.model = LazyLlamaModel(config)
@@ -119,16 +157,31 @@ class LazyLlamaForCausalLM(PreTrainedModel):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
-        self,
-        kv_cache: KVCache,
-        aux_cache: AuxCache,
-        cache_position: torch.LongTensor,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
-    ):
+            self,
+            kv_cache: KVCache,
+            aux_cache: AuxCache,
+            cache_position: torch.LongTensor,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            output_attentions: Optional[bool] = None,
+        ):
+        """
+        Executes the forward pass for the model, updating the hidden states and caches,
+
+        Args:
+            kv_cache (KVCache): The key-value cache.
+            aux_cache (AuxCache): The aux cache.
+            cache_position (torch.LongTensor): The position of the hidden states in the sequence. Same as the `cache_position`
+                in the original code.
+            input_ids (torch.LongTensor): The input token IDs of shape (batch_size, sequence_length).
+            attention_mask (torch.Tensor): The 2D attention mask of shape (batch_size, sequence_length).
+            position_ids (torch.LongTensor): The position IDs for the whole sequence. Note that in the original code, this
+                argument was only storing the positions of the current hidden states, not the whole sequence.
+            inputs_embeds (torch.FloatTensor): Optional input embeddings. Can be used instead of `input_ids`.
+            output_attentions (bool): Whether to return attention weights.
+        """
         outputs = self.model(
             kv_cache=kv_cache,
             aux_cache=aux_cache,
@@ -147,16 +200,30 @@ class LazyLlamaForCausalLM(PreTrainedModel):
         return logits, outputs[1] if output_attentions else None
     
     def generate(
-        self,
-        input_ids: torch.LongTensor,
-        attention_mask: torch.Tensor,
-        max_length: int,
-        eos_token_id: int,
-        pad_token_id: int,
-        output_attentions: bool = False, 
-        logits_processor: Optional[LogitsProcessorList] = None,
-        do_sample: bool = False,
-    ):
+            self,
+            input_ids: torch.LongTensor,
+            attention_mask: torch.Tensor,
+            max_length: int,
+            eos_token_id: int,
+            pad_token_id: int,
+            output_attentions: Optional[bool] = False, 
+            logits_processor: Optional[LogitsProcessorList] = None,
+            do_sample: Optional[bool] = False,
+        ) -> torch.LongTensor:
+        """
+        Generates a sequence of tokens from a given prompt. It can be used for both greedy and sampling-based decoding.
+
+        Args:
+            input_ids (torch.LongTensor): The input token IDs of shape (batch_size, sequence_length).
+            attention_mask (torch.Tensor): The 2D attention mask of shape (batch_size, sequence_length).
+            max_length (int): The maximum length of the generated sequence. This must be provided since dynamic token pruning
+                relies on the maximum length of the sequence for allocating memory for caches.
+            eos_token_id (int): The end of a sequence token ID.
+            pad_token_id (int): The padding token ID.
+            output_attentions (Optional[bool]): Whether to return attention weights.
+            logits_processor (Optional[LogitsProcessorList]): A list of logits processors to apply to the logits.
+            do_sample (Optional[bool]): Whether to use sampling-based decoding or not.
+        """
         output_sequence = input_ids
 
         batch_size = input_ids.shape[0]
@@ -237,7 +304,19 @@ class LazyLlamaForCausalLM(PreTrainedModel):
             
         return output_sequence
     
-    def from_llama_state_dict(llama_state_dict, config, pruning_rates=None):
+    def from_llama_state_dict(
+            llama_state_dict: OrderedDict, 
+            config: Union[LazyLlamaConfig, LlamaConfig], 
+            pruning_rates: Optional[dict] = None
+        ):
+        """
+        Initializes the LazyLlamaForCausalLM from a state dict of a LlamaModel.
+        
+        Args:
+            llama_state_dict (OrderedDict): The state dict of the LlamaModel.
+            config (Union[LlamaConfig, LazyLlamaConfig]): The configuration of the LazyLlamaModel.
+            pruning_rates (Optional[dict]): The pruning rates for each layer. Only required if `config` is an instance of LlamaConfig.
+        """
         if isinstance(config, LlamaConfig):
             config = LazyLlamaConfig.from_llama_config(pruning_rates, config)
         elif not isinstance(config, LazyLlamaConfig):
