@@ -35,17 +35,25 @@ class Context:
 
         self.in_kv_cache_idxs = None
 
+        self._update_keys_idxs_to_tokens_idxs = True
+        self._update_tkns_idxs_to_hidden_states_idxs = True
+
     @property
     def keys_idxs_to_tokens_idxs(self):
         """A mapping from the attention keys indexes to the tokens indexes"""
-        return torch.cat([self.in_kv_cache_idxs, self.hidden_states_idxs], dim=0)
+        if self._update_keys_idxs_to_tokens_idxs:
+            self._keys_idxs_to_tokens_idxs = torch.cat([self.in_kv_cache_idxs, self.hidden_states_idxs], dim=0)
+            self._update_keys_idxs_to_tokens_idxs = False
+        return self._keys_idxs_to_tokens_idxs
 
     @property
     def tkns_idxs_to_hidden_states_idxs(self):
         """Mapping from the tokens indexes (positions in the sequence) to the hidden states indexes"""
-        mapping = torch.empty(self.sequence_length, device=self.device, dtype=torch.long)
-        mapping[self.hidden_states_idxs] = torch.arange(self.hidden_states_idxs.shape[0], device=self.device, dtype=torch.long)
-        return mapping
+        if self._update_tkns_idxs_to_hidden_states_idxs:
+            self._tkns_idxs_to_hidden_states_idxs = torch.empty(self.sequence_length, device=self.device, dtype=torch.long)
+            self._tkns_idxs_to_hidden_states_idxs[self.hidden_states_idxs] = torch.arange(self.hidden_states_idxs.shape[0], device=self.device, dtype=torch.long)
+            self._update_tkns_idxs_to_hidden_states_idxs = False
+        return self._tkns_idxs_to_hidden_states_idxs
     
     @property
     def hidden_states_bit_array(self):
@@ -59,6 +67,8 @@ class Context:
 
         self.in_kv_cache_idxs = in_kv_cache_idxs
         self.in_kv_cache_bit_array = in_kv_cache_bit_array
+
+        self._update_keys_idxs_to_tokens_idxs = True
 
         if in_kv_cache_idxs.shape[0] == 0:
             cache = None
@@ -90,14 +100,15 @@ class Context:
         )
         in_aux_cache_idxs = torch.nonzero(in_aux_cache_bit_array).view(-1)
 
-        states_to_concatenate = [self.hidden_states]
-
-        for position_idx in in_aux_cache_idxs:
-            states_to_concatenate.append(self.aux_cache.cache[layer_idx-1][:, [position_idx], :])
-
-        self.hidden_states = torch.cat(states_to_concatenate, dim=1)
+        self.hidden_states = torch.cat([
+            self.hidden_states, 
+            torch.index_select(self.aux_cache.cache[layer_idx-1], 1, in_aux_cache_idxs)
+        ], dim=1)
 
         self.hidden_states_idxs = torch.cat([self.hidden_states_idxs, in_aux_cache_idxs], dim=0)
+
+        self._update_keys_idxs_to_tokens_idxs = True
+        self._update_tkns_idxs_to_hidden_states_idxs = True
 
     @property
     def hidden_states_positions(self):
@@ -108,11 +119,8 @@ class Context:
             self.selected_tokens_bit_array, 
             torch.logical_not(self.kv_cache.cache_status_bit_array[layer_idx])
         )
-        torch.logical_or(
-            self.kv_cache.cache_status_bit_array[layer_idx],
-            in_hidden_states_bit_array,
-            out=self.kv_cache.cache_status_bit_array[layer_idx],
-        )
+
+        self.kv_cache.cache_status_bit_array[layer_idx].logical_or_(in_hidden_states_bit_array)
 
         new_kv_cache_idxs = torch.nonzero(in_hidden_states_bit_array).view(-1)
 
@@ -139,17 +147,11 @@ class Context:
 
         to_add_to_aux_bit_array = torch.logical_and(
             pruned_tokens_bit_array, 
-            torch.logical_and(
-                torch.logical_not(in_next_layer_kv_bit_array), 
-                torch.logical_not(in_aux_cache_bit_array)
-            )
+            torch.logical_not(torch.logical_or(in_next_layer_kv_bit_array, in_aux_cache_bit_array))
         ) 
-        torch.logical_or(
-            self.aux_cache.cache_status_bit_array[layer_idx],
-            to_add_to_aux_bit_array,
-            out=self.aux_cache.cache_status_bit_array[layer_idx],
-        )
-        
+
+        self.aux_cache.cache_status_bit_array[layer_idx].logical_or_(to_add_to_aux_bit_array)
+
         to_add_to_aux_idxs = torch.nonzero(to_add_to_aux_bit_array).view(-1)
 
         # Hidden states are stored in random order, so the tkns_idxs_to_hidden_states_idxs mapping is needed. 
@@ -167,6 +169,9 @@ class Context:
         hidden_states_to_keep_idxs = torch.nonzero(hidden_states_to_keep_bit_array).view(-1)
 
         # Hidden states are stored in random order, so the tkns_idxs_to_hidden_states_idxs mapping is needed.
-        self.hidden_states = self.hidden_states[:, self.tkns_idxs_to_hidden_states_idxs[hidden_states_to_keep_idxs], :]
+        self.hidden_states = torch.index_select(self.hidden_states, 1, self.tkns_idxs_to_hidden_states_idxs[hidden_states_to_keep_idxs])
 
         self.hidden_states_idxs = hidden_states_to_keep_idxs
+
+        self._update_keys_idxs_to_tokens_idxs = True
+        self._update_tkns_idxs_to_hidden_states_idxs = True
